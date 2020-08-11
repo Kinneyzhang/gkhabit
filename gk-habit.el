@@ -31,15 +31,18 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'emacsql-sqlite)
+(require 'emacsql)
+(require 'emacsql-sqlite3)
 
 (defconst gkh-buffer "*Gk-Habit*")
 
 (defconst gkh-weekly-report-buffer "*Habit-Weekly-Report*")
 
-(defvar gkh-db (emacsql-sqlite3 "~/.emacs.d/gk-habit/habit.db"))
+(setq gkh-db (emacsql-sqlite3 "~/.emacs.d/gk-habit/habit.db"))
 
 (defvar gkh-file "~/.emacs.d/gk-habit/habit.org")
+
+(setq gkh-weekdays '("Mon" "Tue" "Wed" "Thu" "Fri" "Sat" "Sun"))
 
 (defvar gkh-record-status '("DONE" "MISS"))
 
@@ -47,16 +50,13 @@
 
 (defvar gkh-period '("get-up" "morning" "noon" "afternoon" "evening" "before-sleep"))
 
-(defvar gkh-table-habit-column
-  '("create-time" "name" "frequency" "frequency-param"
-    "peroid" "remind-time" "remind-string" "status" "archive-time"))
+(setq gkh-table-habit-column '("create-time" "name" "frequency-type" "frequency-param" "period" "remind-time" "remind-string" "status" "archive-time"))
 
-(defvar gkh-table-record-column
-  '("create-time" "habit" "status" "comment"))
+(setq gkh-table-record-column '("create-time" "habit" "status" "comment"))
 
 (defun gkh-db-create-tables ()
+  "Create database tables of gk-habit."  
   (interactive)
-  "Create database tables of gk-habit."
   (emacsql gkh-db [:create-table habit
 				 ([(create-time string :primary-key :not-null)
 				   (name string :not-null :unique)
@@ -134,17 +134,29 @@
       (gkh-org-table-draw)
       (message "Habit '%s' is added!" habit))))
 
+;; ------------------------------------------------------------
+
+(defun gkh-record-today-todos ()
+  "Get a list of habit need to be recorded today."
+  ;; active habit and need to be recorded today and some maybe habit.
+  )
+
+(defun gkh-record-current-todos ()
+  "Get a list of habit need to be recorded now."
+  (let ((today-habits (mapcar 'car (emacsql gkh-db `[:select name :from habit])))
+	(recorded-habits (mapcar 'car (emacsql gkh-db `[:select habit :from record :where (like create-time ,(concat (format-time-string "%Y-%m-%d") "%"))]))))
+    (remove-if `(lambda (x) (member x ',recorded-habits)) today-habits)))
+
 (defun gkh-record ()
   "Insert a habit redord in table."
   (interactive)
   (let* ((create-time (format-time-string "%Y-%m-%d %T"))
-	 (habit (completing-read "Choose a habit: "
-				 (emacsql gkh-db [:select [name] :from habit
-							  :where (= status "Active")])))
+	 (habit (completing-read "Choose a habit: " (gkh-record-current-todos)))
 	 (status (completing-read "Is the habit done?" gkh-record-status nil t))
 	 (comment
-	  (when (string= "MISS" status)
-	    (completing-read "Reason why missed: " nil))))
+	  (if (string= "MISS" status)
+	      (completing-read "Reason why missed: " nil)
+	    (completing-read "Say something: " nil))))
     (emacsql gkh-db `[:insert-into record
 				   :values ([,create-time ,habit ,status ,comment])])
     (gkh-org-table-draw)
@@ -197,6 +209,7 @@
   (select-window
    (or (get-buffer-window gkh-buffer)
        (selected-window)))
+  (ignore-errors (kill-buffer gkh-buffer))
   (with-current-buffer (get-buffer-create gkh-buffer)
     (org-mode)
     (read-only-mode -1)
@@ -218,6 +231,20 @@
 	 (last-of-week-second (+ first-of-week-second (* 6 86400))))
     (cons first-of-week-second last-of-week-second)))
 
+(defun gkh--format-frequency (habit)
+  "Format habit frequency string."
+  (let ((frequency-type (caar (emacsql gkh-db `[:select frequency-type :from habit :where (= name ,habit)])))
+	(frequency-param (caar (emacsql gkh-db `[:select frequency-param :from habit :where (= name ,habit)]))))
+    (cond
+     ((string= frequency-type "everyday")
+      frequency-type)
+     ((string= frequency-type "repeat")
+      (let* ((day-nums (mapcar 'string-to-number (split-string frequency-param "" t "^ +")))
+	     (week-days (mapcar (lambda (i) (nth (1- i) gkh-weekdays)) day-nums)))
+	(concat "repeat on " (string-join week-days ", "))))
+     ((member frequency-type '("by-week" "by-month"))
+      (concat frequency-param " times a " (cadr (split-string frequency-type "-")))))))
+
 (defun gkh-weekly-table-report ()
   "Weekly report in org table"
   (interactive)
@@ -227,27 +254,31 @@
   (select-window
    (or (get-buffer-window gkh-weekly-report-buffer)
        (selected-window)))
+  (ignore-errors (kill-buffer gkh-weekly-report-buffer))
   (with-current-buffer (get-buffer-create gkh-weekly-report-buffer)
     (org-mode)
-    (let ((weekdays '("Monday" "Tuesday" "Wensday" "Thursday" "Friday" "Saturday" "Sunday"))
-	  (habits (mapcar 'car (emacsql gkh-db '[:select name :from habit :where (= status "Active")])))
+    (let ((habits (mapcar 'car (emacsql gkh-db '[:select name :from habit :where (= status "Active")])))
 	  (first-of-week-date (format-time-string "%Y-%m-%d"
 						  (car (gkh-current-week-days))))
 	  (last-of-week-date (format-time-string "%Y-%m-%d"
 						 (cdr (gkh-current-week-days)))))
       (insert (concat "* " first-of-week-date " ~ " last-of-week-date "\n\n"))
-      (org-table-create (concat "8x" (number-to-string (1+ (length habits)))))
+      (org-table-create (concat "9x" (number-to-string (1+ (length habits)))))
       (goto-char (point-min))
       (skip-chars-forward "^|")
       (when (org-at-table-p)
 	(org-table-next-field)
 	(insert "Habit\\Week")
+	(org-table-next-field)
+	(insert "Frequency")
 	(dotimes (i 7)
 	  (org-table-next-field)
-	  (insert (nth i weekdays)))
+	  (insert (nth i gkh-weekdays)))
 	(dotimes (i (length habits))
 	  (org-table-next-field)
 	  (insert (nth i habits))
+	  (org-table-next-field)
+	  (insert (gkh--format-frequency (nth i habits)))
 	  (dotimes (j 7)
 	    (let* ((nth-of-week-date (format-time-string "%Y-%m-%d"
 							 (+ (* j 86400) (car (gkh-current-week-days)))))
