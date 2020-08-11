@@ -1,4 +1,4 @@
-;;; gk-habit.el --- Habit record and review in emacs. -*- lexical-binding: t; -*-b
+;;; gk-habit.el --- Habit record and review in emacs. -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2020 Kinney Zhang
 ;;
