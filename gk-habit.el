@@ -6,7 +6,7 @@
 ;; Keywords: habit record
 ;; Author: Kinney Zhang <kinneyzhang666@gmail.com>
 ;; URL: http://github.com/Kinneyzhang/gk-habit
-;; Package-Requires: ((emacs "26.3"))
+;; Package-Requires: ((emacs "26.3") (valign) (emacsql))
 
 ;; This file is not part of GNU Emacs.
 
@@ -24,7 +24,7 @@
 ;; along with this program; if not, write to the Free Software
 ;; Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
-;;; Commentary:
+;;; Commentary: Record and review habit in org table and graph.
 
 ;; 
 
@@ -32,6 +32,7 @@
 
 (require 'cl-lib)
 (require 'emacsql)
+(require 'valign)
 (require 'emacsql-sqlite3)
 
 (defconst gkh-buffer "*Gk-Habit*")
@@ -45,6 +46,8 @@
 (defvar gkh-file "~/.emacs.d/gk-habit/habit.org")
 
 (defvar gkh-weekdays '("Mon" "Tue" "Wed" "Thu" "Fri" "Sat" "Sun"))
+
+(defvar gkh-weekdays-2 '("Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat"))
 
 (defvar gkh-record-status '("DONE" "MISS"))
 
@@ -297,8 +300,10 @@
    (or (get-buffer-window gkh-table-report-buffer)
        (selected-window)))
   (with-current-buffer (get-buffer-create gkh-table-report-buffer)
+    (gk-habit-mode)
     (read-only-mode -1)
     (erase-buffer)
+    (setq-local gkh-report-type "weekly")
     (setq-local gkh-first-day seconds)
     (let* ((first-of-week-date (format-time-string "%Y-%m-%d" gkh-first-day))
 	   (last-of-week-date (format-time-string "%Y-%m-%d" (+ gkh-first-day (* 6 86400))))
@@ -363,14 +368,13 @@
 	    (let ((last-of-week-day-num (date-to-day (concat last-of-week-date " 00:00:00"))))
 	      (when (>= last-of-week-day-num first-record-date-num)
 		(insert (gkh--get-achieved-rate (nth i habits) first-of-week-date last-of-week-date))))))))
-    (gk-habit-mode)
     (org-table-align)
     (if gkh-cjk-table-align
 	(valign-mode)
       (valign-mode -1))
     (forward-line)
     (newline)
-    (insert "» [q] quit   » [f] next week   » [b] previous week   » [g] refresh table")
+    (insert "» [W] weekly report  » [M] monthly report  » go back today\n» [f] next  » [b] previous  » [q] quit  » [g] refresh\n")
     (read-only-mode)
     (goto-char (point-min)))
   (switch-to-buffer gkh-table-report-buffer)
@@ -432,6 +436,66 @@
       (if (date-leap-year-p year)
 	  29 28)))))
 
+(defun gkh-draw-table (LIST)
+  "Draw org table from a LIST form."
+  (let ((column (catch 'break
+		  (dolist (row-data LIST)
+		    (when (listp row-data)
+		      (throw 'break (length row-data))))))
+	(beg (point)))
+    (org-table-create (concat (number-to-string column) "x1"))
+    (goto-char beg)
+    (when (org-at-table-p)
+      (org-table-next-field)
+      (dotimes (i (length LIST))
+	(when (nth i LIST)
+	  (let ((row-data (nth i LIST)))
+	    (if (listp row-data)
+		(dolist (data row-data)
+		  (cond
+		   ((numberp data)
+		    (insert (number-to-string data)))
+		   ((null data)
+		    (insert ""))
+		   (t (insert data)))
+		  (org-table-next-field))
+	      (when (equal 'hl row-data)
+		(org-table-insert-hline 1)))
+	    (when (= i (1- (length LIST)))
+	      (org-table-kill-row))
+	    ))))
+    (forward-line)))
+
+(defun gkh-sequence-offset-and-group (sequence offset group)
+  (let ((offset (if (stringp offset)
+		    (string-to-number offset)
+		  offset))
+	(seq-num (length sequence))
+	end-offset
+	groups-len)
+    (dotimes (i offset)
+      (setq sequence (cons nil sequence)))
+    (setq groups-len (length (seq-partition sequence group)))
+    (setq end-offset (- (* group groups-len) offset seq-num))
+    (dotimes (i end-offset)
+      (setq sequence (append sequence (list nil))))
+    (seq-partition sequence group)))
+
+(defun gkh-month-date-group (year month offset)
+  "Generate month's weekly number sequence."
+  (let* ((day-num (gkh--get-month-day-num year month))
+	 (number-seq (number-sequence 1 day-num)))
+    (gkh-sequence-offset-and-group number-seq offset 7)))
+
+(defun gkh-month-combine-date-and-status (year month offset status-list)
+  "Combine month's date and status."
+  (let ((date-groups (gkh-month-date-group year month offset))
+	(status-groups (gkh-sequence-offset-and-group status-list offset 7))
+	hl-date-status-list)
+    (dotimes (i (length status-groups))
+      (setq hl-date-status-list (append hl-date-status-list (cons 'hl (cons (nth i date-groups) (list (nth i status-groups)))))))
+    hl-date-status-list))
+
 (defun gkh-monthly-table-report (seconds)
   "Habits monthly report in org table."
   (gkh-org-table-draw)
@@ -439,69 +503,62 @@
    (or (get-buffer-window gkh-table-report-buffer)
        (selected-window)))
   (with-current-buffer (get-buffer-create gkh-table-report-buffer)
+    (gk-habit-mode)
     (read-only-mode -1)
     (erase-buffer)
+    (setq-local gkh-report-type "monthly")
     (setq-local gkh-first-day seconds)
     (let* ((year (format-time-string "%Y" gkh-first-day))
 	   (month (format-time-string "%m" gkh-first-day))
+	   (month-string (format-time-string "%B" gkh-first-day))
+	   (day-of-week (format-time-string "%w" gkh-first-day)) 
+	   (month-day-num (gkh--get-month-day-num year month))
 	   (last-of-month-date (format-time-string "%Y-%m-%d" (+ gkh-first-day (* (1- (gkh--get-month-day-num year month)) 86400))))
 	   (all-habits (mapcar 'car (emacsql gkh-db `[:select name :from habit
 							      :where (= status "Active")])))
-	   (habits (gkh--get-habits-in-range all-habits (concat last-of-month-date " 00:00:00"))))
-      (insert (concat "* " year "-" month "\n\n"))
-      (org-table-create (concat (format "%s" (1+ (length habits))) "x" (number-to-string (1+ (gkh--get-month-day-num year month)))))
+	   (habits (gkh--get-habits-in-range all-habits (concat last-of-month-date " 00:00:00")))
+	   pos)
       (goto-char (point-min))
-      (skip-chars-forward "^|")
-      (when (org-at-table-p)
-	(org-table-next-field)
-	(insert "Date\\Habit")
-	(dolist (habit habits)
-	  (org-table-next-field)
-	  (insert habit))
-	(dotimes (i (gkh--get-month-day-num year month))
-	  (let* ((nth-of-month-date (format-time-string "%Y-%m-%d" (+ (* i 86400) gkh-first-day))))
-	    (org-table-next-field)
-	    (insert (number-to-string (1+ i)))
-	    (dotimes (j (length habits))
-	      (let* ((habit-create-date (caar (emacsql gkh-db `[:select create-time :from habit
-									:where (= name ,(nth j habits))])))
-		     (freq-type (caar (emacsql gkh-db `[:select frequency-type :from habit
-								:where (= name ,(nth j habits))])))
-		     (freq-param (caar (emacsql gkh-db `[:select frequency-param :from habit
-								 :where (= name ,(nth j habits))])))
-		     (habit-create-date-num (date-to-day habit-create-date))
-		     current-date-num
-		     (status (caar (emacsql gkh-db `[:select status :from record
-							     :where (and (= habit ,(nth j habits))
-									 (= (like create-time
-										  ,(concat year "-" month
-											   (if (= (length (number-to-string (1+ i))) 1)
-											       (format "-0%s %%" (1+ i))
-											     (format "-%s %%" (1+ i)))))))]))))
-		;; (message "%s" (concat nth-of-month-date " 00:00:00"))
-		(setq current-date-num (date-to-day (concat nth-of-month-date " 00:00:00")))
-		(org-table-next-field)
-		(if (>= current-date-num habit-create-date-num)
-		    (cond
-		     ((string= status "DONE")
-		      (insert "√"))
-		     ((string= status "MISS")
-		      (insert "×"))
-		     ((string= "everyday" freq-type)
-		      (insert "·"))
-		     ;; ((string= "repeat" freq-type)
-		     ;;  (when (member (1+ j) (mapcar 'string-to-number (split-string freq-param "" t "^ +")))
-		     ;; 	(insert "·")))
-		     )
-		  (insert "-"))))))))
-    (gk-habit-mode)
-    (org-table-align)
+      (insert (concat "* " month-string ", " year "\n\n"))
+      (insert "» [W] weekly report  » [M] monthly report  » go back today\n» [f] next  » [b] previous  » [q] quit  » [g] refresh\n\n")
+      (dolist (habit habits)
+	(let* ((habit-create-date (caar (emacsql gkh-db `[:select create-time :from habit
+								  :where (= name ,habit)])))
+	       (habit-create-date-num (date-to-day habit-create-date))
+	       status-list
+	       date-status-list)
+	  (dotimes (i (gkh--get-month-day-num year month))
+	    (let* ((nth-of-month-date (format-time-string "%Y-%m-%d" (+ (* i 86400) gkh-first-day)))
+		   (current-date-num (date-to-day (concat nth-of-month-date " 00:00:00")))
+		   (status (caar (emacsql gkh-db `[:select status :from record
+							   :where (and (= habit ,habit)
+								       (= (like create-time
+										,(concat year "-" month
+											 (if (= (length (number-to-string (1+ i))) 1)
+											     (format "-0%s %%" (1+ i))
+											   (format "-%s %%" (1+ i)))))))]))))
+	      (if (>= current-date-num habit-create-date-num)
+		  (cond
+		   ((string= status "DONE")
+		    (push "√" status-list))
+		   ((string= status "MISS")
+		    (push "×" status-list))
+		   (t (push "." status-list))
+		   ;; ((string= "everyday" freq-type)
+		   ;;  (push "." status-list))
+		   ;; ((string= "repeat" freq-type)
+		   ;;  (when (member (1+ j) (mapcar 'string-to-number (split-string freq-param "" t "^ +")))
+		   ;; 	(insert "·")))
+		   )
+		(push "-" status-list))))
+	  (setq date-status-list (gkh-month-combine-date-and-status year month day-of-week (reverse status-list)))
+	  (insert (concat "** " habit "\n\n"))
+	  (gkh-draw-table
+	   `(,gkh-weekdays-2 ,@date-status-list))
+	  (insert "\n"))))
     (if gkh-cjk-table-align
 	(valign-mode)
       (valign-mode -1))
-    (forward-line)
-    (newline)
-    (insert "» [q] quit   » [f] next week   » [b] previous week   » [g] refresh table")
     (read-only-mode)
     (goto-char (point-min)))
   (switch-to-buffer gkh-table-report-buffer)
@@ -562,24 +619,56 @@
     (gkh-monthly-table-report gkh-first-day)
     (message "Monthly report refreshed.")))
 
+(defun gkh-backward-report-view ()
+  (interactive)
+  (with-temp-buffer
+    (set-buffer gkh-table-report-buffer)
+    (cond ((string= gkh-report-type "weekly")
+	   (funcall 'gkh-report-previous-week))
+	  ((string= gkh-report-type "monthly")
+	   (funcall 'gkh-report-previous-month)))))
+
+(defun gkh-forward-report-view ()
+  (interactive)
+  (with-temp-buffer
+    (set-buffer gkh-table-report-buffer)
+    (cond ((string= gkh-report-type "weekly")
+	   (funcall 'gkh-report-next-week))
+	  ((string= gkh-report-type "monthly")
+	   (funcall 'gkh-report-next-month)))))
+
+(defun gkh-today-report-view ()
+  (interactive)
+  (with-temp-buffer
+    (set-buffer gkh-table-report-buffer)
+    (cond ((string= gkh-report-type "weekly")
+	   (funcall 'gkh-report-current-week))
+	  ((string= gkh-report-type "monthly")
+	   (funcall 'gkh-report-current-month)))))
+
+(defun gkh-refresh-report-view ()
+  (interactive)
+  (with-temp-buffer
+    (set-buffer gkh-table-report-buffer)
+    (cond ((string= gkh-report-type "weekly")
+	   (funcall 'gkh-report-refresh-week))
+	  ((string= gkh-report-type "monthly")
+	   (funcall 'gkh-report-refresh-month)))))
+
 (defvar gk-habit-mode-map nil "Keymap for `gk-habit-mode'")
 
 (progn
   (setq gk-habit-mode-map (make-sparse-keymap))
   (define-key gk-habit-mode-map (kbd "q") 'kill-current-buffer)
-  (define-key gk-habit-mode-map (kbd "W") 'gkh-report-current-week)
-  (define-key gk-habit-mode-map (kbd "b") 'gkh-report-previous-week)
-  (define-key gk-habit-mode-map (kbd "f") 'gkh-report-next-week)
-  (define-key gk-habit-mode-map (kbd "g") 'gkh-report-refresh-week)
   (define-key gk-habit-mode-map (kbd "M") 'gkh-report-current-month)
-  (define-key gk-habit-mode-map (kbd "<") 'gkh-report-previous-month)
-  (define-key gk-habit-mode-map (kbd ">") 'gkh-report-next-month))
+  (define-key gk-habit-mode-map (kbd "W") 'gkh-report-current-week)
+  (define-key gk-habit-mode-map (kbd "b") 'gkh-backward-report-view)
+  (define-key gk-habit-mode-map (kbd "f") 'gkh-forward-report-view)
+  (define-key gk-habit-mode-map (kbd ".") 'gkh-today-report-view)
+  (define-key gk-habit-mode-map (kbd "g") 'gkh-refresh-report-view))
 
 (define-derived-mode gk-habit-mode org-mode "gkh"
   (use-local-map gk-habit-mode-map))
-
-(defun gk-habit-init ()
-  )
 
 (provide 'gk-habit)
 ;;; gk-habit.el ends here
