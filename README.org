@@ -1,11 +1,14 @@
   *This Repo is the outcome of my tentative idea and is not maintained anymore. I have found a better way to record my daily habits, that is my [[https://github.com/Kinneyzhang/gkroam][gkroam]]*.
 
-* Habit record and review
-  Weekly Report:
-  [[./image/weekly-report.png]]
-  
-  Monthly Report:
-  [[./image/monthly-report.png]]
+*** Habit record and review
+    =Weekly Report:=
 
-  Record Tables:
-  [[./image/record-table.png]]
+    [[./image/weekly-report.png]]
+  
+    =Monthly Report:=
+
+    [[./image/monthly-report.png]]
+
+    =Record Tables:=
+
+    [[./image/record-table.png]]
